@@ -379,6 +379,7 @@ const (
 	ServerFeatureAudioVideoPermissions = "audio-video-permissions"
 	ServerFeatureTransientData         = "transient-data"
 	ServerFeatureInCallAll             = "incall-all"
+	ServerFeatureHelloV2               = "hello-v2"
 
 	// Features for internal clients only.
 	ServerFeatureInternalVirtualSessions = "virtual-sessions"
@@ -389,11 +390,13 @@ var (
 		ServerFeatureAudioVideoPermissions,
 		ServerFeatureTransientData,
 		ServerFeatureInCallAll,
+		ServerFeatureHelloV2,
 	}
 	DefaultFeaturesInternal = []string{
 		ServerFeatureInternalVirtualSessions,
 		ServerFeatureTransientData,
 		ServerFeatureInCallAll,
+		ServerFeatureHelloV2,
 	}
 )
 
