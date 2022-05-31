@@ -68,8 +68,7 @@ func Test_TransientData(t *testing.T) {
 }
 
 func Test_TransientMessages(t *testing.T) {
-	hub, _, _, server, shutdown := CreateHubForTest(t)
-	defer shutdown()
+	hub, _, _, server := CreateHubForTest(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -270,7 +269,7 @@ func Test_TransientMessages(t *testing.T) {
 		t.Fatalf("Expected room %s, got %s", roomId, room.Room.RoomId)
 	}
 
-	ignored, err := client3.RunUntilJoinedAndReturnIgnored(ctx, hello1.Hello, hello2.Hello, hello3.Hello)
+	_, ignored, err := client3.RunUntilJoinedAndReturn(ctx, hello1.Hello, hello2.Hello, hello3.Hello)
 	if err != nil {
 		t.Fatal(err)
 	}

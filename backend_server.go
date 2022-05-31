@@ -29,7 +29,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -45,7 +44,7 @@ import (
 )
 
 const (
-	maxBodySize = 64 * 1024
+	maxBodySize = 256 * 1024
 
 	randomUsernameLength = 32
 
@@ -268,7 +267,7 @@ func (b *BackendServer) parseRequestBody(f func(http.ResponseWriter, *http.Reque
 			return
 		}
 
-		body, err := ioutil.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			log.Println("Error reading body: ", err)
 			http.Error(w, "Could not read body", http.StatusBadRequest)

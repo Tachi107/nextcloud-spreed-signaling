@@ -23,6 +23,7 @@ package signaling
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -436,6 +437,7 @@ type mcuJanusClient struct {
 	id         uint64
 	session    uint64
 	roomId     uint64
+	sid        string
 	streamType string
 
 	handle    *JanusHandle
@@ -453,6 +455,10 @@ type mcuJanusClient struct {
 
 func (c *mcuJanusClient) Id() string {
 	return strconv.FormatUint(c.id, 10)
+}
+
+func (c *mcuJanusClient) Sid() string {
+	return c.sid
 }
 
 func (c *mcuJanusClient) StreamType() string {
@@ -575,14 +581,14 @@ func (c *mcuJanusClient) handleTrickle(event *TrickleMsg) {
 	}
 }
 
-func (c *mcuJanusClient) selectStream(ctx context.Context, substream int, temporal int, callback func(error, map[string]interface{})) {
+func (c *mcuJanusClient) selectStream(ctx context.Context, stream *streamSelection, callback func(error, map[string]interface{})) {
 	handle := c.handle
 	if handle == nil {
 		callback(ErrNotConnected, nil)
 		return
 	}
 
-	if substream < 0 && temporal < 0 {
+	if stream == nil || !stream.HasValues() {
 		callback(nil, nil)
 		return
 	}
@@ -590,11 +596,8 @@ func (c *mcuJanusClient) selectStream(ctx context.Context, substream int, tempor
 	configure_msg := map[string]interface{}{
 		"request": "configure",
 	}
-	if substream >= 0 {
-		configure_msg["substream"] = substream
-	}
-	if temporal >= 0 {
-		configure_msg["temporal"] = temporal
+	if stream != nil {
+		stream.AddToMessage(configure_msg)
 	}
 	_, err := handle.Message(ctx, configure_msg, nil)
 	if err != nil {
@@ -781,7 +784,7 @@ func (m *mcuJanus) getOrCreatePublisherHandle(ctx context.Context, id string, st
 	return handle, response.Session, roomId, nil
 }
 
-func (m *mcuJanus) NewPublisher(ctx context.Context, listener McuListener, id string, streamType string, bitrate int, mediaTypes MediaType, initiator McuInitiator) (McuPublisher, error) {
+func (m *mcuJanus) NewPublisher(ctx context.Context, listener McuListener, id string, sid string, streamType string, bitrate int, mediaTypes MediaType, initiator McuInitiator) (McuPublisher, error) {
 	if _, found := streamTypeUserIds[streamType]; !found {
 		return nil, fmt.Errorf("Unsupported stream type %s", streamType)
 	}
@@ -799,6 +802,7 @@ func (m *mcuJanus) NewPublisher(ctx context.Context, listener McuListener, id st
 			id:         atomic.AddUint64(&m.clientId, 1),
 			session:    session,
 			roomId:     roomId,
+			sid:        sid,
 			streamType: streamType,
 
 			handle:    handle,
@@ -883,6 +887,10 @@ func (p *mcuJanusPublisher) HasMedia(mt MediaType) bool {
 	return (p.mediaTypes & mt) == mt
 }
 
+func (p *mcuJanusPublisher) SetMedia(mt MediaType) {
+	p.mediaTypes = mt
+}
+
 func (p *mcuJanusPublisher) NotifyReconnected() {
 	ctx := context.TODO()
 	handle, session, roomId, err := p.mcu.getOrCreatePublisherHandle(ctx, p.id, p.streamType, p.bitrate)
@@ -941,6 +949,8 @@ func (p *mcuJanusPublisher) SendMessage(ctx context.Context, message *MessageCli
 			msgctx, cancel := context.WithTimeout(context.Background(), p.mcu.mcuTimeout)
 			defer cancel()
 
+			// TODO Tear down previous publisher and get a new one if sid does
+			// not match?
 			p.sendOffer(msgctx, jsep_msg, callback)
 		}
 	case "candidate":
@@ -948,7 +958,11 @@ func (p *mcuJanusPublisher) SendMessage(ctx context.Context, message *MessageCli
 			msgctx, cancel := context.WithTimeout(context.Background(), p.mcu.mcuTimeout)
 			defer cancel()
 
-			p.sendCandidate(msgctx, jsep_msg["candidate"], callback)
+			if data.Sid == "" || data.Sid == p.Sid() {
+				p.sendCandidate(msgctx, jsep_msg["candidate"], callback)
+			} else {
+				go callback(fmt.Errorf("Candidate message sid (%s) does not match publisher sid (%s)", data.Sid, p.Sid()), nil)
+			}
 		}
 	case "endOfCandidates":
 		// Ignore
@@ -1028,6 +1042,7 @@ func (m *mcuJanus) NewSubscriber(ctx context.Context, listener McuListener, publ
 
 			id:         atomic.AddUint64(&m.clientId, 1),
 			roomId:     pub.roomId,
+			sid:        strconv.FormatUint(handle.Id, 10),
 			streamType: streamType,
 
 			handle:    handle,
@@ -1119,6 +1134,8 @@ func (p *mcuJanusSubscriber) NotifyReconnected() {
 	p.handle = handle
 	p.handleId = handle.Id
 	p.roomId = pub.roomId
+	p.sid = strconv.FormatUint(handle.Id, 10)
+	p.listener.SubscriberSidUpdated(p)
 	log.Printf("Subscriber %d for publisher %s reconnected on handle %d", p.id, p.publisher, p.handleId)
 }
 
@@ -1136,7 +1153,7 @@ func (p *mcuJanusSubscriber) Close(ctx context.Context) {
 	p.mcuJanusClient.Close(ctx)
 }
 
-func (p *mcuJanusSubscriber) joinRoom(ctx context.Context, callback func(error, map[string]interface{})) {
+func (p *mcuJanusSubscriber) joinRoom(ctx context.Context, stream *streamSelection, callback func(error, map[string]interface{})) {
 	handle := p.handle
 	if handle == nil {
 		callback(ErrNotConnected, nil)
@@ -1153,6 +1170,9 @@ retry:
 		"ptype":   "subscriber",
 		"room":    p.roomId,
 		"feed":    streamTypeUserIds[p.streamType],
+	}
+	if stream != nil {
+		stream.AddToMessage(join_msg)
 	}
 	join_response, err := handle.Message(ctx, join_msg, nil)
 	if err != nil {
@@ -1187,6 +1207,8 @@ retry:
 			p.handle = handle
 			p.handleId = handle.Id
 			p.roomId = pub.roomId
+			p.sid = strconv.FormatUint(handle.Id, 10)
+			p.listener.SubscriberSidUpdated(p)
 			p.closeChan = make(chan bool, 1)
 			go p.run(p.handle, p.closeChan)
 			log.Printf("Already connected subscriber %d for %s, leaving and re-joining on handle %d", p.id, p.streamType, p.handleId)
@@ -1224,6 +1246,112 @@ retry:
 	callback(nil, join_response.Jsep)
 }
 
+func (p *mcuJanusSubscriber) update(ctx context.Context, stream *streamSelection, callback func(error, map[string]interface{})) {
+	handle := p.handle
+	if handle == nil {
+		callback(ErrNotConnected, nil)
+		return
+	}
+
+	configure_msg := map[string]interface{}{
+		"request": "configure",
+		"update":  true,
+	}
+	if stream != nil {
+		stream.AddToMessage(configure_msg)
+	}
+	configure_response, err := handle.Message(ctx, configure_msg, nil)
+	if err != nil {
+		callback(err, nil)
+		return
+	}
+
+	callback(nil, configure_response.Jsep)
+}
+
+type streamSelection struct {
+	substream sql.NullInt16
+	temporal  sql.NullInt16
+	audio     sql.NullBool
+	video     sql.NullBool
+}
+
+func (s *streamSelection) HasValues() bool {
+	return s.substream.Valid || s.temporal.Valid || s.audio.Valid || s.video.Valid
+}
+
+func (s *streamSelection) AddToMessage(message map[string]interface{}) {
+	if s.substream.Valid {
+		message["substream"] = s.substream.Int16
+	}
+	if s.temporal.Valid {
+		message["temporal"] = s.temporal.Int16
+	}
+	if s.audio.Valid {
+		message["audio"] = s.audio.Bool
+	}
+	if s.video.Valid {
+		message["video"] = s.video.Bool
+	}
+}
+
+func parseStreamSelection(payload map[string]interface{}) (*streamSelection, error) {
+	var stream streamSelection
+	if value, found := payload["substream"]; found {
+		switch value := value.(type) {
+		case int:
+			stream.substream.Valid = true
+			stream.substream.Int16 = int16(value)
+		case float32:
+			stream.substream.Valid = true
+			stream.substream.Int16 = int16(value)
+		case float64:
+			stream.substream.Valid = true
+			stream.substream.Int16 = int16(value)
+		default:
+			return nil, fmt.Errorf("Unsupported substream value: %v", value)
+		}
+	}
+
+	if value, found := payload["temporal"]; found {
+		switch value := value.(type) {
+		case int:
+			stream.temporal.Valid = true
+			stream.temporal.Int16 = int16(value)
+		case float32:
+			stream.temporal.Valid = true
+			stream.temporal.Int16 = int16(value)
+		case float64:
+			stream.temporal.Valid = true
+			stream.temporal.Int16 = int16(value)
+		default:
+			return nil, fmt.Errorf("Unsupported temporal value: %v", value)
+		}
+	}
+
+	if value, found := payload["audio"]; found {
+		switch value := value.(type) {
+		case bool:
+			stream.audio.Valid = true
+			stream.audio.Bool = value
+		default:
+			return nil, fmt.Errorf("Unsupported audio value: %v", value)
+		}
+	}
+
+	if value, found := payload["video"]; found {
+		switch value := value.(type) {
+		case bool:
+			stream.video.Valid = true
+			stream.video.Bool = value
+		default:
+			return nil, fmt.Errorf("Unsupported video value: %v", value)
+		}
+	}
+
+	return &stream, nil
+}
+
 func (p *mcuJanusSubscriber) SendMessage(ctx context.Context, message *MessageClientMessage, data *MessageClientMessageData, callback func(error, map[string]interface{})) {
 	statsMcuMessagesTotal.WithLabelValues(data.Type).Inc()
 	jsep_msg := data.Payload
@@ -1235,54 +1363,50 @@ func (p *mcuJanusSubscriber) SendMessage(ctx context.Context, message *MessageCl
 			msgctx, cancel := context.WithTimeout(context.Background(), p.mcu.mcuTimeout)
 			defer cancel()
 
-			p.joinRoom(msgctx, callback)
+			stream, err := parseStreamSelection(jsep_msg)
+			if err != nil {
+				go callback(err, nil)
+				return
+			}
+
+			if data.Sid == "" || data.Sid != p.Sid() {
+				p.joinRoom(msgctx, stream, callback)
+			} else {
+				p.update(msgctx, stream, callback)
+			}
 		}
 	case "answer":
 		p.deferred <- func() {
 			msgctx, cancel := context.WithTimeout(context.Background(), p.mcu.mcuTimeout)
 			defer cancel()
 
-			p.sendAnswer(msgctx, jsep_msg, callback)
+			if data.Sid == "" || data.Sid == p.Sid() {
+				p.sendAnswer(msgctx, jsep_msg, callback)
+			} else {
+				go callback(fmt.Errorf("Answer message sid (%s) does not match subscriber sid (%s)", data.Sid, p.Sid()), nil)
+			}
 		}
 	case "candidate":
 		p.deferred <- func() {
 			msgctx, cancel := context.WithTimeout(context.Background(), p.mcu.mcuTimeout)
 			defer cancel()
 
-			p.sendCandidate(msgctx, jsep_msg["candidate"], callback)
+			if data.Sid == "" || data.Sid == p.Sid() {
+				p.sendCandidate(msgctx, jsep_msg["candidate"], callback)
+			} else {
+				go callback(fmt.Errorf("Candidate message sid (%s) does not match subscriber sid (%s)", data.Sid, p.Sid()), nil)
+			}
 		}
 	case "endOfCandidates":
 		// Ignore
 	case "selectStream":
-		substream := -1
-		if s, found := jsep_msg["substream"]; found {
-			switch s := s.(type) {
-			case int:
-				substream = s
-			case float32:
-				substream = int(s)
-			case float64:
-				substream = int(s)
-			default:
-				go callback(fmt.Errorf("Unsupported substream value: %v", s), nil)
-				return
-			}
+		stream, err := parseStreamSelection(jsep_msg)
+		if err != nil {
+			go callback(err, nil)
+			return
 		}
-		temporal := -1
-		if s, found := jsep_msg["temporal"]; found {
-			switch s := s.(type) {
-			case int:
-				temporal = s
-			case float32:
-				temporal = int(s)
-			case float64:
-				temporal = int(s)
-			default:
-				go callback(fmt.Errorf("Unsupported temporal value: %v", s), nil)
-				return
-			}
-		}
-		if substream == -1 && temporal == -1 {
+
+		if stream == nil || !stream.HasValues() {
 			// Nothing to do
 			go callback(nil, nil)
 			return
@@ -1292,7 +1416,7 @@ func (p *mcuJanusSubscriber) SendMessage(ctx context.Context, message *MessageCl
 			msgctx, cancel := context.WithTimeout(context.Background(), p.mcu.mcuTimeout)
 			defer cancel()
 
-			p.selectStream(msgctx, substream, temporal, callback)
+			p.selectStream(msgctx, stream, callback)
 		}
 	default:
 		// Return error asynchronously

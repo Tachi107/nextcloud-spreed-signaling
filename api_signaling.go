@@ -35,6 +35,9 @@ const (
 
 // ClientMessage is a message that is sent from a client to the server.
 type ClientMessage struct {
+	json.Marshaler
+	json.Unmarshaler
+
 	// The unique request id (optional).
 	Id string `json:"id,omitempty"`
 
@@ -129,6 +132,9 @@ func (m *ClientMessage) NewWrappedErrorServerMessage(e error) *ServerMessage {
 
 // ServerMessage is a message that is sent from the server to a client.
 type ServerMessage struct {
+	json.Marshaler
+	json.Unmarshaler
+
 	Id string `json:"id,omitempty"`
 
 	Type string `json:"type"`
@@ -620,6 +626,18 @@ type RoomFlagsServerMessage struct {
 	Flags     uint32 `json:"flags"`
 }
 
+type ChatComment map[string]interface{}
+
+type RoomEventMessageDataChat struct {
+	Comment *ChatComment `json:"comment,omitempty"`
+}
+
+type RoomEventMessageData struct {
+	Type string `json:"type"`
+
+	Chat *RoomEventMessageDataChat `json:"chat,omitempty"`
+}
+
 type EventServerMessage struct {
 	Target string `json:"target"`
 	Type   string `json:"type"`
@@ -646,6 +664,15 @@ type EventServerMessageSessionEntry struct {
 	RoomSessionId string           `json:"roomsessionid,omitempty"`
 }
 
+func (e *EventServerMessageSessionEntry) Clone() *EventServerMessageSessionEntry {
+	return &EventServerMessageSessionEntry{
+		SessionId:     e.SessionId,
+		UserId:        e.UserId,
+		User:          e.User,
+		RoomSessionId: e.RoomSessionId,
+	}
+}
+
 // MCU-related types
 
 type AnswerOfferMessage struct {
@@ -654,7 +681,7 @@ type AnswerOfferMessage struct {
 	Type     string                 `json:"type"`
 	RoomType string                 `json:"roomType"`
 	Payload  map[string]interface{} `json:"payload"`
-	Update   bool                   `json:"update,omitempty"`
+	Sid      string                 `json:"sid,omitempty"`
 }
 
 // Type "transient"

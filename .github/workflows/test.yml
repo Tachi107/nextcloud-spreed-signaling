@@ -4,12 +4,14 @@ on:
   push:
     branches: [ master ]
     paths:
+      - '.github/workflows/test.yml'
       - '**.go'
       - 'go.*'
       - 'Makefile'
   pull_request:
     branches: [ master ]
     paths:
+      - '.github/workflows/test.yml'
       - '**.go'
       - 'go.*'
       - 'Makefile'
@@ -21,24 +23,32 @@ jobs:
     strategy:
       matrix:
         go-version:
-          - "1.13"
-          - "1.14"
-          - "1.15"
-          - "1.16"
           - "1.17"
           - "1.18"
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - uses: actions/setup-go@v2
+    - uses: actions/setup-go@v3
       with:
         go-version: ${{ matrix.go-version }}
 
-    - name: Cache dependencies
+    - id: go-cache-paths
+      run: |
+        echo "::set-output name=go-build::$(go env GOCACHE)"
+        echo "::set-output name=go-mod::$(go env GOMODCACHE)"
+        echo "::set-output name=go-version::$(go version | cut -d ' ' -f 3)"
+
+    - name: Go build cache
       uses: actions/cache@v3
       with:
-        path: vendor/
-        key: vendor-${{ matrix.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+        path: ${{ steps.go-cache-paths.outputs.go-build }}
+        key: ${{ runner.os }}-${{ steps.go-cache-paths.outputs.go-version }}-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+
+    - name: Go mod cache
+      uses: actions/cache@v3
+      with:
+        path: ${{ steps.go-cache-paths.outputs.go-mod }}
+        key: ${{ runner.os }}-${{ steps.go-cache-paths.outputs.go-version }}-mod-${{ hashFiles('**/go.mod', '**/go.sum') }}
 
     - name: Build applications
       run: |
@@ -54,12 +64,13 @@ jobs:
     - name: Generate coverage report
       run: |
         make cover || make cover
+        echo "GOROOT=$(go env GOROOT)" >> $GITHUB_ENV
 
     - name: Convert coverage to lcov
-      uses: jandelgado/gcov2lcov-action@v1.0.8
+      uses: jandelgado/gcov2lcov-action@v1.0.9
       with:
-          infile: cover.out
-          outfile: cover.lcov
+        infile: cover.out
+        outfile: cover.lcov
 
     - name: Coveralls Parallel
       uses: coverallsapp/github-action@1.1.3

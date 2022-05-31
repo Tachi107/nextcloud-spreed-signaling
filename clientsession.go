@@ -214,6 +214,9 @@ func (s *ClientSession) hasAnyPermissionLocked(permission ...Permission) bool {
 func (s *ClientSession) hasPermissionLocked(permission Permission) bool {
 	if !s.supportsPermissions {
 		// Old-style session that doesn't receive permissions from Nextcloud.
+		if result, found := DefaultPermissionOverrides[permission]; found {
+			return result
+		}
 		return true
 	}
 
@@ -571,7 +574,7 @@ func (s *ClientSession) sendOffer(client McuClient, sender string, streamType st
 		Type:     "offer",
 		RoomType: streamType,
 		Payload:  offer,
-		Update:   true,
+		Sid:      client.Sid(),
 	}
 	offer_data, err := json.Marshal(offer_message)
 	if err != nil {
@@ -601,6 +604,7 @@ func (s *ClientSession) sendCandidate(client McuClient, sender string, streamTyp
 		Payload: map[string]interface{}{
 			"candidate": candidate,
 		},
+		Sid: client.Sid(),
 	}
 	candidate_data, err := json.Marshal(candidate_message)
 	if err != nil {
@@ -641,6 +645,11 @@ func (s *ClientSession) SendError(e *Error) bool {
 }
 
 func (s *ClientSession) SendMessage(message *ServerMessage) bool {
+	message = s.filterMessage(message)
+	if message == nil {
+		return true
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -696,6 +705,9 @@ func (s *ClientSession) OnIceCompleted(client McuClient) {
 
 	// An empty candidate signals the end of candidates.
 	// s.OnIceCandidate(client, nil)
+}
+
+func (s *ClientSession) SubscriberSidUpdated(subscriber McuSubscriber) {
 }
 
 func (s *ClientSession) PublisherClosed(publisher McuPublisher) {
@@ -876,7 +888,7 @@ func (s *ClientSession) GetOrCreatePublisher(ctx context.Context, mcu Mcu, strea
 			}
 		}
 		var err error
-		publisher, err = mcu.NewPublisher(ctx, s, s.PublicId(), streamType, bitrate, mediaTypes, client)
+		publisher, err = mcu.NewPublisher(ctx, s, s.PublicId(), data.Sid, streamType, bitrate, mediaTypes, client)
 		s.mu.Lock()
 		if err != nil {
 			return nil, err
@@ -895,6 +907,8 @@ func (s *ClientSession) GetOrCreatePublisher(ctx context.Context, mcu Mcu, strea
 			s.publishers[streamType] = publisher
 		}
 		log.Printf("Publishing %s as %s for session %s", streamType, publisher.Id(), s.PublicId())
+	} else {
+		publisher.SetMedia(mediaTypes)
 	}
 
 	return publisher, nil
@@ -1024,6 +1038,110 @@ func (s *ClientSession) storePendingMessage(message *ServerMessage) {
 	}
 }
 
+func filterDisplayNames(events []*EventServerMessageSessionEntry) []*EventServerMessageSessionEntry {
+	result := make([]*EventServerMessageSessionEntry, 0, len(events))
+	for _, event := range events {
+		if event.User == nil {
+			result = append(result, event)
+			continue
+		}
+
+		var userdata map[string]interface{}
+		if err := json.Unmarshal(*event.User, &userdata); err != nil {
+			result = append(result, event)
+			continue
+		}
+
+		if _, found := userdata["displayname"]; !found {
+			result = append(result, event)
+			continue
+		}
+
+		delete(userdata, "displayname")
+		if len(userdata) == 0 {
+			// No more userdata, no need to serialize empty map.
+			e := event.Clone()
+			e.User = nil
+			result = append(result, e)
+			continue
+		}
+
+		data, err := json.Marshal(userdata)
+		if err != nil {
+			result = append(result, event)
+			continue
+		}
+
+		e := event.Clone()
+		e.User = (*json.RawMessage)(&data)
+		result = append(result, e)
+	}
+	return result
+}
+
+func (s *ClientSession) filterMessage(message *ServerMessage) *ServerMessage {
+	switch message.Type {
+	case "event":
+		switch message.Event.Target {
+		case "participants":
+			if message.Event.Type == "update" {
+				m := message.Event.Update
+				users := make(map[string]bool)
+				for _, entry := range m.Users {
+					users[entry["sessionId"].(string)] = true
+				}
+				for _, entry := range m.Changed {
+					if users[entry["sessionId"].(string)] {
+						continue
+					}
+					m.Users = append(m.Users, entry)
+				}
+				// TODO(jojo): Only send all users if current session id has
+				// changed its "inCall" flag to true.
+				m.Changed = nil
+			}
+		case "room":
+			switch message.Event.Type {
+			case "join":
+				if s.HasPermission(PERMISSION_HIDE_DISPLAYNAMES) {
+					message.Event.Join = filterDisplayNames(message.Event.Join)
+				}
+			case "message":
+				if message.Event.Message == nil || message.Event.Message.Data == nil || len(*message.Event.Message.Data) == 0 || !s.HasPermission(PERMISSION_HIDE_DISPLAYNAMES) {
+					return message
+				}
+
+				var data RoomEventMessageData
+				if err := json.Unmarshal(*message.Event.Message.Data, &data); err != nil {
+					return message
+				}
+
+				if data.Type == "chat" && data.Chat != nil && data.Chat.Comment != nil {
+					if displayName, found := (*data.Chat.Comment)["actorDisplayName"]; found && displayName != "" {
+						(*data.Chat.Comment)["actorDisplayName"] = ""
+						if encoded, err := json.Marshal(data); err == nil {
+							message.Event.Message.Data = (*json.RawMessage)(&encoded)
+						}
+					}
+				}
+			}
+		}
+	case "message":
+		if message.Message != nil && message.Message.Data != nil && len(*message.Message.Data) > 0 && s.HasPermission(PERMISSION_HIDE_DISPLAYNAMES) {
+			var data MessageServerMessageData
+			if err := json.Unmarshal(*message.Message.Data, &data); err != nil {
+				return message
+			}
+
+			if data.Type == "nickChanged" {
+				return nil
+			}
+		}
+	}
+
+	return message
+}
+
 func (s *ClientSession) processNatsMessage(msg *NatsMessage) *ServerMessage {
 	switch msg.Type {
 	case "message":
@@ -1048,23 +1166,7 @@ func (s *ClientSession) processNatsMessage(msg *NatsMessage) *ServerMessage {
 				return nil
 			}
 		case "event":
-			if msg.Message.Event.Target == "participants" &&
-				msg.Message.Event.Type == "update" {
-				m := msg.Message.Event.Update
-				users := make(map[string]bool)
-				for _, entry := range m.Users {
-					users[entry["sessionId"].(string)] = true
-				}
-				for _, entry := range m.Changed {
-					if users[entry["sessionId"].(string)] {
-						continue
-					}
-					m.Users = append(m.Users, entry)
-				}
-				// TODO(jojo): Only send all users if current session id has
-				// changed its "inCall" flag to true.
-				m.Changed = nil
-			} else if msg.Message.Event.Target == "room" {
+			if msg.Message.Event.Target == "room" {
 				// Can happen mostly during tests where an older room NATS message
 				// could be received by a subscriber that joined after it was sent.
 				if msg.SendTime.Before(s.getRoomJoinTime()) {

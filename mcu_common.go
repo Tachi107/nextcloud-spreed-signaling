@@ -55,6 +55,8 @@ type McuListener interface {
 	OnIceCandidate(client McuClient, candidate interface{})
 	OnIceCompleted(client McuClient)
 
+	SubscriberSidUpdated(subscriber McuSubscriber)
+
 	PublisherClosed(publisher McuPublisher)
 	SubscriberClosed(subscriber McuSubscriber)
 }
@@ -73,12 +75,13 @@ type Mcu interface {
 
 	GetStats() interface{}
 
-	NewPublisher(ctx context.Context, listener McuListener, id string, streamType string, bitrate int, mediaTypes MediaType, initiator McuInitiator) (McuPublisher, error)
+	NewPublisher(ctx context.Context, listener McuListener, id string, sid string, streamType string, bitrate int, mediaTypes MediaType, initiator McuInitiator) (McuPublisher, error)
 	NewSubscriber(ctx context.Context, listener McuListener, publisher string, streamType string) (McuSubscriber, error)
 }
 
 type McuClient interface {
 	Id() string
+	Sid() string
 	StreamType() string
 
 	Close(ctx context.Context)
@@ -90,6 +93,7 @@ type McuPublisher interface {
 	McuClient
 
 	HasMedia(MediaType) bool
+	SetMedia(MediaType)
 }
 
 type McuSubscriber interface {
