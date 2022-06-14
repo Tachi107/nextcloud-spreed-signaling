@@ -153,8 +153,13 @@ func main() {
 		log.Fatal("Could not create NATS client: ", err)
 	}
 
+	events, err := signaling.NewAsyncEventsNats(nats)
+	if err != nil {
+		log.Fatal("Could not create async events client: ", err)
+	}
+
 	r := mux.NewRouter()
-	hub, err := signaling.NewHub(config, nats, r, version)
+	hub, err := signaling.NewHub(config, events, r, version)
 	if err != nil {
 		log.Fatal("Could not create hub: ", err)
 	}
